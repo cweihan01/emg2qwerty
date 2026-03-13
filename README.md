@@ -3,6 +3,35 @@
 
 This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
 
+## What We Implemented
+- **Lightning modules** (`emg2qwerty/lightning.py`): all use the same front-end (spectrogram norm + multi-band rotation-invariant MLP) and CTC loss; they differ by sequence encoder.
+  - **CNNLSTMCTCModule** - CNN + bidirectional LSTM
+  - **RNNBiLSTMModule** - bidirectional LSTM
+  - **CNNGRUCTCModule** - CNN + bidirectional GRU
+  - **CNNCTCModule** - pure 1D CNN encoder
+- **Encoder and block modules** (`emg2qwerty/modules.py`): added/used by the new Lightning modules.
+  - **CNNLSTMEncoder** - CNN + bidirectional LSTM sequence encoder
+  - **RNNBiLSTMEncoder** - bidirectional LSTM encoder
+  - **CNNGRUEncoder** - 1D CNN + bidirectional GRU
+  - **CNNEncoder** - 1D CNN only (no RNN)
+  - **Conv1DBlock** - reusable 1D conv + BatchNorm + ReLU + dropout
+  - **ChannelSubset** - selects first N electrode channels
+- **Transforms** (`emg2qwerty/transforms.py`): added for preprocessing pipelines.
+  - **Downsample** - temporal downsampling by a factor
+- **Configs**
+  - **Model configs** (`config/model/`):
+    - `cnn_lstm_ctc.yaml`
+    - `rnn-bilstm.yaml`
+    - `cnn_gru_ctc.yaml`
+    - `cnn_ctc.yaml`
+  - **Base configs** (`config/base.yaml`):
+    - `model: cnn_gru_ctc` (best model)
+    - `transforms: log_spectrogram_downsampling`
+  - **Transform configs** (`config/transforms/`):
+    - `log_spectrogram.yaml` (base)
+    - `log_spectrogram_downsampling.yaml` (adds downsampling before log-spectrogram)
+    - `log_spectrogram_custom.yaml` (different hop_length / jitter)
+
 ## Guiding Tips + FAQs
 _Last updated 2/13/2025_
 - Read through the Project Guidelines to ensure that you have a clear understanding of what we expect
