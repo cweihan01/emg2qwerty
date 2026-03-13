@@ -1,0 +1,16 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.CNNCTCModule
+  in_features: 528
+  mlp_features: [384]
+
+  # CNN parameters
+  cnn_channels: [512, 512, 256, 256, 256, 256, 256]
+  cnn_kernel_size: 7
+  cnn_dilations: [1, 2, 4, 8, 16, 32, 64]
+  dropout: 0.1
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000  # 4 sec windows at 2 kHz EMG
+  padding: [1800, 200]  # 900 ms past context, 100 ms future context

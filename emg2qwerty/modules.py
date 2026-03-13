@@ -278,3 +278,285 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+# ---------------------------------------------------------------------------
+# Custom Models
+# ---------------------------------------------------------------------------
+
+class CNNLSTMEncoder(nn.Module):
+    """A convolutional LSTM based sequence encoder.
+    
+    Applies dilated 1D convolutions for expansive local feature extraction 
+    over time, followed by a Bidirectional LSTM. Uses 'same' padding to 
+    ensure the temporal dimension (T) remains unchanged for CTC loss.
+
+    Args:
+        num_features (int): `num_features` for an input of shape (T, N, num_features).
+        cnn_channels (list): A list of output channels per 1D convolutional layer.
+        cnn_kernel_sizes (list): A list of kernel sizes for the convolutions.
+        cnn_dilations (list): A list of dilation rates for the convolutions.
+        rnn_hidden_size (int): The hidden size for the BiLSTM.
+        rnn_num_layers (int): The number of stacked BiLSTM layers.
+        rnn_dropout (float): Dropout probability for the BiLSTM.
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        cnn_channels: Sequence[int] = (64, 128, 256),
+        cnn_kernel_sizes: Sequence[int] = (15, 15, 15),
+        cnn_dilations: Sequence[int] = (1, 2, 4),
+        rnn_hidden_size: int = 256,
+        rnn_num_layers: int = 2,
+        rnn_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        
+        assert len(cnn_channels) == len(cnn_kernel_sizes) == len(cnn_dilations), "Mismatched CNN config"
+
+        cnn_blocks: list[nn.Module] = []
+        in_channels = num_features
+        
+        for out_channels, k_size, dilation in zip(cnn_channels, cnn_kernel_sizes, cnn_dilations):
+            cnn_blocks.extend(
+                [
+                    nn.Conv1d(
+                        in_channels, 
+                        out_channels, 
+                        kernel_size=k_size, 
+                        dilation=dilation,
+                        padding="same"
+                    ),
+                    nn.BatchNorm1d(out_channels),
+                    nn.ReLU(),
+                ]
+            )
+            in_channels = out_channels
+
+        self.cnn = nn.Sequential(*cnn_blocks)
+        
+        # LayerNorm helps stabilize the inputs before feeding them into the unrolled RNN
+        self.pre_rnn_norm = nn.LayerNorm(in_channels)
+
+        self.rnn = nn.LSTM(
+            input_size=in_channels,
+            hidden_size=rnn_hidden_size,
+            num_layers=rnn_num_layers,
+            bidirectional=True,
+            dropout=rnn_dropout if rnn_num_layers > 1 else 0.0,
+        )
+        
+        self.out_features = rnn_hidden_size * 2
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, num_features)
+        
+        # Conv1d expects (N, C, T)
+        x = inputs.movedim(0, -1)
+        x = self.cnn(x)
+        
+        # LSTM expects (T, N, C_out)
+        x = x.movedim(-1, 0)
+        x = self.pre_rnn_norm(x)
+        outputs, _ = self.rnn(x)
+        
+        return outputs  # (T, N, rnn_hidden_size * 2)
+
+
+class RNNBiLSTMEncoder(nn.Module):
+    """An RNN encoder that uses Bi-LSTM.
+    
+    Args:
+        num_features (int): `num_features` for an input of shape (T, N, num_features).
+        rnn_hidden_size (int): The hidden size for the BiLSTM.
+        rnn_num_layers (int): The number of stacked BiLSTM layers.
+        rnn_dropout (float): Dropout probability for the BiLSTM.
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        rnn_hidden_size: int = 256,
+        rnn_num_layers: int = 5,
+        rnn_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        in_channels = num_features
+        self.rnn = nn.LSTM(
+            input_size=in_channels,
+            hidden_size=rnn_hidden_size,
+            num_layers=rnn_num_layers,
+            bidirectional=True,
+            dropout=rnn_dropout if rnn_num_layers > 1 else 0.0,
+        )
+        # self.norm = nn.LayerNorm(rnn_hidden_size * 2)
+        
+        self.out_features = rnn_hidden_size * 2
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, num_features)
+        outputs, _ = self.rnn(inputs)
+        # outputs = self.norm(outputs)
+        
+        return outputs  # (T, N, rnn_hidden_size * 2)
+
+
+class ChannelSubset(nn.Module):
+    """Selects the first ``num_channels`` electrode channels from the input.
+
+    Input shape:  (T, N, num_bands, electrode_channels, freq)
+    Output shape: (T, N, num_bands, num_channels, freq)
+
+    Args:
+        num_channels (int): Number of electrode channels to keep (taken from
+            the front of the channel dimension).
+    """
+
+    def __init__(self, num_channels: int) -> None:
+        super().__init__()
+        self.num_channels = num_channels
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return inputs[:, :, :, : self.num_channels, :]
+
+
+class Conv1DBlock(nn.Module):
+    """A 1D convolutional block with BatchNorm, ReLU, and dropout.
+
+    Uses same-length ("same") convolution so the temporal dimension T is
+    preserved. Expects inputs of shape (T, N, in_channels) and returns
+    (T, N, out_channels).
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        kernel_size (int): Temporal kernel size (should be odd for exact
+            same-length output).
+        dropout (float): Dropout probability applied after activation.
+            (default: 0.1)
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dropout: float = 0.1,
+        dilation: int = 1,
+    ) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            padding=dilation * (kernel_size - 1) // 2,
+            dilation=dilation,
+        )
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # (T, N, in_channels) -> (N, in_channels, T)
+        x = inputs.permute(1, 2, 0)
+        x = self.dropout(self.relu(self.bn(self.conv(x))))
+        # (N, out_channels, T) -> (T, N, out_channels)
+        return x.permute(2, 0, 1)
+
+
+class CNNGRUEncoder(nn.Module):
+    """A 1D CNN encoder followed by a bidirectional GRU for sequence modeling.
+
+    Takes an input of shape (T, N, num_features), applies a stack of
+    ``Conv1DBlock`` layers along the time axis (preserving T via same-padding),
+    then feeds the output through a bidirectional multi-layer GRU.
+
+    Returns a tensor of shape (T, N, gru_hidden_size * 2).
+
+    Args:
+        num_features (int): Input feature dimension (i.e. C in (T, N, C)).
+        cnn_channels (list): Output channel counts for each Conv1DBlock.
+        cnn_kernel_size (int): Temporal kernel size shared by all Conv1DBlocks.
+        gru_hidden_size (int): GRU hidden size per direction; output features
+            are ``gru_hidden_size * 2`` due to bidirectionality.
+        gru_num_layers (int): Number of stacked GRU layers.
+        dropout (float): Dropout probability for Conv1DBlocks and between GRU
+            layers (only applied when ``gru_num_layers > 1``). (default: 0.1)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        cnn_channels: Sequence[int],
+        cnn_kernel_size: int,
+        gru_hidden_size: int,
+        gru_num_layers: int,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        assert len(cnn_channels) > 0
+        cnn_blocks: list[nn.Module] = []
+        in_c = num_features
+        for out_c in cnn_channels:
+            cnn_blocks.append(Conv1DBlock(in_c, out_c, cnn_kernel_size, dropout))
+            in_c = out_c
+        self.cnn = nn.Sequential(*cnn_blocks)
+
+        # Dropout between GRU layers if multiple layers are used
+        self.gru = nn.GRU(
+            input_size=in_c,
+            hidden_size=gru_hidden_size,
+            num_layers=gru_num_layers,
+            batch_first=False,
+            bidirectional=True,
+            dropout=dropout if gru_num_layers > 1 else 0.0,
+        )
+        self.out_features = gru_hidden_size * 2
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x = self.cnn(inputs)   # (T, N, cnn_channels[-1])
+        x, _ = self.gru(x)     # (T, N, gru_hidden_size * 2)
+        return x
+
+
+class CNNEncoder(nn.Module):
+    """Pure 1D CNN encoder with dilated convolutions.
+
+    Stacks ``Conv1DBlock`` layers with increasing dilations to achieve a large
+    temporal receptive field without a recurrent layer.
+
+    Args:
+        num_features (int): Input feature dimension.
+        cnn_channels (list): Output channel count for each block.
+        cnn_kernel_size (int): Temporal kernel size shared by all blocks.
+        cnn_dilations (list): Dilation for each block; same length as
+            ``cnn_channels``.
+        dropout (float): Dropout probability in each block. (default: 0.1)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        cnn_channels: Sequence[int],
+        cnn_kernel_size: int,
+        cnn_dilations: Sequence[int],
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        assert len(cnn_channels) == len(cnn_dilations), (
+            "cnn_channels and cnn_dilations must have the same length"
+        )
+
+        blocks: list[nn.Module] = []
+        in_c = num_features
+        for out_c, dil in zip(cnn_channels, cnn_dilations):
+            blocks.append(Conv1DBlock(in_c, out_c, cnn_kernel_size, dropout, dil))
+            in_c = out_c
+        self.cnn = nn.Sequential(*blocks)
+        self.out_features = in_c
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.cnn(inputs)  # (T, N, cnn_channels[-1])
+
