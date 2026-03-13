@@ -243,3 +243,22 @@ class SpecAugment:
 
         # (..., C, freq, T) -> (T, ..., C, freq)
         return x.movedim(-1, 0)
+
+# ---------------------------------------------------------------------------
+# Custom Transforms
+# ---------------------------------------------------------------------------
+
+class Downsample:
+    """Downsamples the input by a factor.
+
+    Args:
+        factor (int): The factor to downsample by. (default: 2)
+    """
+    def __init__(self, factor: int = 2):
+        assert factor >= 1
+        self.factor = factor
+
+    def __call__(self, data):
+        if self.factor == 1:
+            return data
+        return data[:: self.factor]
