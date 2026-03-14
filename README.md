@@ -4,6 +4,9 @@
 This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
 
 ## What We Implemented
+
+**Report:** [Final_Report.pdf](./Final_Report.pdf)
+
 - **Lightning modules** (`emg2qwerty/lightning.py`): all use the same front-end (spectrogram norm + multi-band rotation-invariant MLP) and CTC loss; they differ by sequence encoder.
   - **CNNLSTMCTCModule** - CNN + bidirectional LSTM
   - **RNNBiLSTMModule** - bidirectional LSTM
